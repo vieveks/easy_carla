@@ -72,11 +72,19 @@ def main():
         image_shape=(args.camera_height, args.camera_width, 3)
     )
     
+    # Detect if running on a server (no display) - use headless mode
+    headless = False
+    if "DISPLAY" not in os.environ or not os.environ["DISPLAY"]:
+        logger.info("No display detected, using headless mode for camera viewer")
+        logger.info("Camera output will not be visible, but processing will continue")
+        headless = True
+    
     # Create camera viewer
     camera_viewer = CameraViewer(
         window_name="CARLA Camera View",
         width=args.camera_width,
-        height=args.camera_height
+        height=args.camera_height,
+        headless=headless
     )
     camera_viewer.fps = args.fps
     camera_viewer.start()

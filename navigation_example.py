@@ -90,10 +90,17 @@ def main():
     # Create camera viewer if enabled
     camera_viewer = None
     if args.show_camera:
+        # Detect if running on a server (no display) - use headless mode
+        headless = False
+        if "DISPLAY" not in os.environ or not os.environ["DISPLAY"]:
+            logger.info("No display detected, using headless mode for camera viewer")
+            headless = True
+            
         camera_viewer = CameraViewer(
             window_name="CARLA Navigation Camera View",
             width=args.camera_width,
-            height=args.camera_height
+            height=args.camera_height,
+            headless=headless
         )
         camera_viewer.start()
     

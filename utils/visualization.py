@@ -31,7 +31,7 @@ class CameraViewer:
     Class for displaying camera input from CARLA in a separate window.
     This provides a real-time view of what the agent is seeing.
     """
-    def __init__(self, window_name="Camera View", width=400, height=300, max_queue_size=5):
+    def __init__(self, window_name="Camera View", width=400, height=300, max_queue_size=5, headless=False):
         """
         Initialize the camera viewer.
         
@@ -40,6 +40,7 @@ class CameraViewer:
             width (int): Width of the display window
             height (int): Height of the display window
             max_queue_size (int): Maximum size of the frame queue
+            headless (bool): Whether to run in headless mode (no display)
         """
         self.window_name = window_name
         self.width = width
@@ -47,16 +48,27 @@ class CameraViewer:
         self.running = False
         self.thread = None
         self.frame_queue = queue.Queue(maxsize=max_queue_size)
+        self.headless = headless
         
-        # Initialize pygame for display
-        pygame.init()
-        pygame.display.init()
-        self.screen = pygame.display.set_mode((width, height))
-        pygame.display.set_caption(window_name)
+        # Initialize pygame for display if not in headless mode
+        if not self.headless:
+            try:
+                pygame.init()
+                pygame.display.init()
+                self.screen = pygame.display.set_mode((width, height))
+                pygame.display.set_caption(window_name)
+                
+                # Initialize a clock for controlling FPS
+                self.clock = pygame.time.Clock()
+                self.fps = 20  # Target FPS
+                print(f"Initialized pygame display: {window_name}")
+            except Exception as e:
+                print(f"Failed to initialize pygame display: {e}")
+                self.headless = True
+                print("Falling back to headless mode")
         
-        # Initialize a clock for controlling FPS
-        self.clock = pygame.time.Clock()
-        self.fps = 20  # Target FPS
+        if self.headless:
+            print(f"Running in headless mode (no display): {window_name}")
     
     def start(self):
         """Start the viewer thread"""
@@ -73,7 +85,12 @@ class CameraViewer:
         if self.thread:
             self.thread.join(timeout=1.0)
             self.thread = None
-        pygame.quit()
+        
+        if not self.headless:
+            try:
+                pygame.quit()
+            except:
+                pass
         print(f"Camera viewer stopped: {self.window_name}")
     
     def update(self, frame):
@@ -88,10 +105,6 @@ class CameraViewer:
             try:
                 # Ensure frame is the right shape and dtype
                 if frame is not None:
-                    # Resize the frame if needed
-                    if frame.shape[0] != self.height or frame.shape[1] != self.width:
-                        frame = cv2.resize(frame, (self.width, self.height))
-                    
                     # Ensure frame is RGB format
                     if len(frame.shape) == 2:  # Grayscale
                         frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
@@ -102,6 +115,14 @@ class CameraViewer:
                     if frame.dtype != np.uint8:
                         frame = (frame * 255).astype(np.uint8)
                     
+                    # Resize the frame if needed
+                    if frame.shape[0] != self.height or frame.shape[1] != self.width:
+                        frame = cv2.resize(frame, (self.width, self.height))
+                    
+                    # Convert to RGB (pygame expects RGB)
+                    if not self.headless:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    
                     self.frame_queue.put(frame, block=False)
             except queue.Full:
                 pass  # Skip frame if queue is full
@@ -111,12 +132,6 @@ class CameraViewer:
         last_frame = None
         
         while self.running:
-            # Check for pygame events (e.g., window close)
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.running = False
-                    break
-            
             # Get newest frame from queue if available
             try:
                 frame = self.frame_queue.get(block=False)
@@ -125,18 +140,34 @@ class CameraViewer:
             except queue.Empty:
                 frame = last_frame  # Keep displaying last frame if no new ones
             
-            # Display the frame if we have one
-            if frame is not None:
-                # Convert frame to pygame surface
-                frame = np.flipud(np.fliplr(frame))  # Flip to match pygame's coordinate system
-                surf = pygame.surfarray.make_surface(frame.swapaxes(0, 1))
-                
-                # Draw to screen
-                self.screen.blit(surf, (0, 0))
-                pygame.display.flip()
+            # Display the frame if we have one and not in headless mode
+            if frame is not None and not self.headless:
+                try:
+                    # Check for pygame events (e.g., window close)
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            self.running = False
+                            break
+                            
+                    # Pygame needs (width, height, 3) format with transposed axes
+                    frame_pygame = frame.transpose(1, 0, 2)
+                    surf = pygame.surfarray.make_surface(frame_pygame)
+                    
+                    # Draw to screen
+                    self.screen.blit(surf, (0, 0))
+                    pygame.display.flip()
+                    
+                    # Control the frame rate
+                    self.clock.tick(self.fps)
+                except Exception as e:
+                    print(f"Error displaying frame: {e}")
+                    # If we encounter display errors, switch to headless mode
+                    self.headless = True
+                    print("Switching to headless mode due to display errors")
             
-            # Control the frame rate
-            self.clock.tick(self.fps)
+            # If in headless mode, just wait a bit to avoid busy-waiting
+            elif self.headless:
+                time.sleep(1.0 / 20)  # Sleep at 20 FPS equivalent
 
 def load_metrics(file_path):
     """

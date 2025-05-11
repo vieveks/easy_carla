@@ -273,10 +273,19 @@ def train(args, agent, env):
     if args.show_camera:
         # Import visualization module
         from utils.visualization import CameraViewer
+        
+        # Detect if running on a server (no display) - use headless mode
+        import os
+        headless = False
+        if "DISPLAY" not in os.environ or not os.environ["DISPLAY"]:
+            logger.info("No display detected, using headless mode for camera viewer")
+            headless = True
+        
         camera_viewer = CameraViewer(
             window_name=f"CARLA {args.algorithm.upper()} Training View",
             width=args.camera_width,
-            height=args.camera_height
+            height=args.camera_height,
+            headless=headless
         )
         camera_viewer.start()
     
@@ -481,10 +490,19 @@ def evaluate(args, agent, env):
     if args.show_camera:
         # Import visualization module
         from utils.visualization import CameraViewer
+        
+        # Detect if running on a server (no display) - use headless mode
+        import os
+        headless = False
+        if "DISPLAY" not in os.environ or not os.environ["DISPLAY"]:
+            logger.info("No display detected, using headless mode for camera viewer")
+            headless = True
+        
         camera_viewer = CameraViewer(
             window_name=f"CARLA {args.algorithm.upper()} Evaluation View",
             width=args.camera_width,
-            height=args.camera_height
+            height=args.camera_height,
+            headless=headless
         )
         camera_viewer.start()
     
