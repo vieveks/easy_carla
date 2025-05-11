@@ -15,6 +15,7 @@ from collections import deque
 # Add parent directory to import path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
+from carla_env.navigation import RouteManager, Waypoint
 
 class CarlaSensor:
     """Base class for CARLA sensors"""
@@ -149,6 +150,12 @@ class CarlaClient:
         self.timeout = timeout
         self.town = town
         
+        # Navigation attributes
+        self.route_manager = None
+        self.navigation_enabled = config.NAVIGATION_ENABLED
+        self.route_visualization = config.ROUTE_VISUALIZATION
+        self.current_difficulty = config.ROUTE_DIFFICULTY
+        
         # Initialize pygame for visualization if needed
         pygame.init()
         
@@ -198,26 +205,45 @@ class CarlaClient:
         else:
             spawn_point = random.choice(spawn_points)
         
-        # Get vehicle blueprint
+        # Find vehicle blueprint
         blueprint = self.blueprint_library.find(vehicle_type)
         
-        # Set blueprint attributes
+        # Set color
         if blueprint.has_attribute('color'):
             color = random.choice(blueprint.get_attribute('color').recommended_values)
             blueprint.set_attribute('color', color)
             
+        # Set role name for hero vehicle
         blueprint.set_attribute('role_name', 'hero')
         
-        # Spawn the vehicle
-        self.vehicle = self.world.spawn_actor(blueprint, spawn_point)
+        # Try to spawn the vehicle
+        self.vehicle = self.world.try_spawn_actor(blueprint, spawn_point)
+        
+        if not self.vehicle:
+            print("Failed to spawn vehicle")
+            return False
+        
+        # Wait for the world to be ready
+        self.world.tick()
         
         # Set up spectator to follow the vehicle
         self.spectator = self.world.get_spectator()
         transform = carla.Transform(self.vehicle.get_transform().location + carla.Location(z=3),
-                                   carla.Rotation(pitch=-30))
+                                  carla.Rotation(pitch=-30))
         self.spectator.set_transform(transform)
         
-        print(f"Spawned vehicle: {self.vehicle.type_id}")
+        # Initialize the route manager if navigation is enabled
+        if self.navigation_enabled:
+            self.route_manager = RouteManager(self.world)
+            self.route_manager.set_target_threshold(config.WAYPOINT_THRESHOLD)
+            self.route_manager.generate_random_route(difficulty=self.current_difficulty, 
+                                                  start_location=spawn_point.location)
+            
+            # Visualize the route if enabled
+            if self.route_visualization:
+                self.visualize_route()
+                
+        print(f"Spawned {vehicle_type}")
         return True
     
     def setup_sensors(self):
@@ -259,20 +285,22 @@ class CarlaClient:
     
     def tick(self):
         """Advance the simulation by one step"""
-        if self.world:
-            # Update spectator position
-            if self.vehicle and self.spectator:
-                transform = self.vehicle.get_transform()
-                spectator_transform = carla.Transform(
-                    transform.location + carla.Location(z=3, x=-5),
-                    carla.Rotation(pitch=-30, yaw=transform.rotation.yaw)
-                )
-                self.spectator.set_transform(spectator_transform)
+        if not self.world:
+            return
             
-            # Advance simulation
-            self.world.tick()
-            return True
-        return False
+        # Advance simulation
+        self.world.tick()
+        
+        # Update spectator to follow the vehicle
+        if self.vehicle and self.spectator:
+            vehicle_transform = self.vehicle.get_transform()
+            camera_transform = carla.Transform(
+                vehicle_transform.location + carla.Location(z=3, x=-5),
+                carla.Rotation(pitch=-15, yaw=vehicle_transform.rotation.yaw)
+            )
+            self.spectator.set_transform(camera_transform)
+        
+        return True
     
     def apply_control(self, throttle=0.0, steer=0.0, brake=0.0, hand_brake=False, reverse=False):
         """Apply control to the vehicle"""
@@ -438,4 +466,81 @@ class CarlaClient:
             # Get the waypoint for the current vehicle location
             waypoint = self.world.get_map().get_waypoint(self.vehicle.get_location())
             return waypoint.is_junction
-        return False 
+        return False
+    
+    def update_navigation(self):
+        """Update navigation and target waypoints based on vehicle position"""
+        if not self.navigation_enabled or not self.route_manager or not self.vehicle:
+            return False
+            
+        # Update the current target based on vehicle position
+        vehicle_loc = self.vehicle.get_location()
+        target_updated = self.route_manager.update_target(vehicle_loc)
+        
+        # Check if we completed the route
+        route_complete = self.route_manager.is_route_complete()
+        
+        # Update route visualization if needed
+        if target_updated and self.route_visualization:
+            self.visualize_route()
+            
+        return route_complete
+    
+    def get_navigation_info(self):
+        """Get navigation information for the current state"""
+        if not self.navigation_enabled or not self.route_manager or not self.vehicle:
+            return {
+                'distance_to_target': float('inf'),
+                'direction_to_target': (0, 0),
+                'route_completion': 0.0,
+                'target_reached': False,
+                'route_complete': False
+            }
+            
+        # Get vehicle location and rotation
+        vehicle_loc = self.vehicle.get_location()
+        vehicle_rot = self.vehicle.get_transform().rotation
+        
+        # Get distance and direction to current target
+        distance = self.route_manager.get_distance_to_target(vehicle_loc)
+        direction = self.route_manager.get_direction_to_target(vehicle_loc, vehicle_rot)
+        
+        # Calculate route completion percentage
+        if len(self.route_manager.waypoints) > 0:
+            completion = self.route_manager.current_target_idx / len(self.route_manager.waypoints)
+        else:
+            completion = 0.0
+            
+        # Check if we've reached the current target
+        target_reached = False
+        if distance < config.WAYPOINT_THRESHOLD:
+            target_reached = True
+            
+        # Check if we've completed the entire route
+        route_complete = self.route_manager.is_route_complete()
+        
+        return {
+            'distance_to_target': distance,
+            'direction_to_target': direction,
+            'route_completion': completion,
+            'target_reached': target_reached,
+            'route_complete': route_complete
+        }
+    
+    def visualize_route(self):
+        """Visualize the current route in the simulator"""
+        if not self.route_visualization or not self.route_manager or not self.world:
+            return
+            
+        # Get the debug helper
+        debug = self.world.debug
+        
+        # Draw the waypoints
+        self.route_manager.draw_waypoints(debug)
+    
+    def set_navigation_difficulty(self, difficulty):
+        """Set the difficulty level for navigation routes"""
+        if not self.route_manager:
+            return
+            
+        self.current_difficulty = difficulty 

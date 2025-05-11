@@ -53,6 +53,21 @@ REWARD_SPEED = 0.2  # Coefficient for speed reward
 REWARD_TARGET_REACHED = 100.0
 REWARD_TIME_PENALTY = -0.1  # Small penalty for each timestep
 
+# Navigation parameters
+NAVIGATION_ENABLED = False  # Whether to use waypoint navigation
+WAYPOINT_THRESHOLD = 5.0  # Distance in meters to consider a waypoint reached
+WAYPOINT_DIRECTION_WEIGHT = 0.5  # Weight for directional reward
+WAYPOINT_DISTANCE_WEIGHT = 0.3  # Weight for distance-based reward
+
+# Route parameters
+ROUTE_DIFFICULTY = 'easy'  # Options: 'easy', 'medium', 'hard'
+DIFFICULTY_PROGRESSION = {  # Episode thresholds for increasing difficulty
+    'easy': 0,      # Start with easy
+    'medium': 100,  # Switch to medium after 100 episodes
+    'hard': 300     # Switch to hard after 300 episodes
+}
+ROUTE_VISUALIZATION = True  # Whether to visualize the route in the simulator
+
 # Training hyperparameters
 COMMON_HYPERPARAMS = {
     'learning_rate': 1e-4,

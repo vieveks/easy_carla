@@ -87,6 +87,25 @@ def parse_args():
     parser.add_argument('--save_interval', type=int, default=None,
                         help='Save model every N episodes')
     
+    # Navigation parameters
+    parser.add_argument('--navigation', action='store_true', default=config.NAVIGATION_ENABLED,
+                        help='Enable point-to-point navigation')
+    parser.add_argument('--route_difficulty', type=str, default=config.ROUTE_DIFFICULTY,
+                        choices=['easy', 'medium', 'hard'],
+                        help='Difficulty level for navigation routes')
+    parser.add_argument('--visualize_route', action='store_true', default=config.ROUTE_VISUALIZATION,
+                        help='Visualize the navigation route in CARLA')
+    parser.add_argument('--waypoint_threshold', type=float, default=config.WAYPOINT_THRESHOLD,
+                        help='Distance threshold to consider a waypoint reached (in meters)')
+    
+    # Visualization parameters
+    parser.add_argument('--show_camera', action='store_true', default=False,
+                        help='Show camera view in a separate window')
+    parser.add_argument('--camera_width', type=int, default=400,
+                        help='Width of the camera window')
+    parser.add_argument('--camera_height', type=int, default=300,
+                        help='Height of the camera window')
+    
     return parser.parse_args()
 
 def create_agent(args):
@@ -211,12 +230,20 @@ def create_environment(args):
     Returns:
         The created environment
     """
+    # Update config with runtime args
+    config.NAVIGATION_ENABLED = args.navigation
+    config.ROUTE_DIFFICULTY = args.route_difficulty
+    config.ROUTE_VISUALIZATION = args.visualize_route
+    config.WAYPOINT_THRESHOLD = args.waypoint_threshold
+    
     # Create environment
     env = CarlaEnv(
         host=args.carla_host,
         port=args.carla_port,
         town=args.carla_map,
-        image_shape=(args.image_height, args.image_width, 3)
+        image_shape=(args.image_height, args.image_width, 3),
+        navigation_enabled=args.navigation,
+        route_difficulty=args.route_difficulty
     )
     
     return env
@@ -240,6 +267,18 @@ def train(args, agent, env):
     file_handler = logging.FileHandler(log_file)
     file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
     logger.addHandler(file_handler)
+    
+    # Create camera viewer if enabled
+    camera_viewer = None
+    if args.show_camera:
+        # Import visualization module
+        from utils.visualization import CameraViewer
+        camera_viewer = CameraViewer(
+            window_name=f"CARLA {args.algorithm.upper()} Training View",
+            width=args.camera_width,
+            height=args.camera_height
+        )
+        camera_viewer.start()
     
     # Save configuration
     config_path = os.path.join(run_dir, "config.json")
@@ -282,6 +321,10 @@ def train(args, agent, env):
         # Reset environment
         state = env.reset()
         
+        # Update camera viewer with initial state
+        if camera_viewer:
+            camera_viewer.update(state)
+        
         # Initialize episode statistics
         done = False
         episode_reward = 0
@@ -295,6 +338,10 @@ def train(args, agent, env):
             
             # Apply action to environment
             next_state, reward, done, info = env.step(action)
+            
+            # Update camera viewer with new state
+            if camera_viewer:
+                camera_viewer.update(next_state)
             
             # Clip reward to prevent extreme values
             clipped_reward = np.clip(reward, -10.0, 10.0)
@@ -389,6 +436,10 @@ def train(args, agent, env):
     # Close progress bar
     progress_bar.close()
     
+    # Close camera viewer if open
+    if camera_viewer:
+        camera_viewer.stop()
+    
     # Plot learning curves
     plot_path = os.path.join(run_results_dir, "learning_curves.png")
     agent.plot_learning_curves(plot_path)
@@ -424,6 +475,18 @@ def evaluate(args, agent, env):
     file_handler = logging.FileHandler(log_file)
     file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
     logger.addHandler(file_handler)
+    
+    # Create camera viewer if enabled
+    camera_viewer = None
+    if args.show_camera:
+        # Import visualization module
+        from utils.visualization import CameraViewer
+        camera_viewer = CameraViewer(
+            window_name=f"CARLA {args.algorithm.upper()} Evaluation View",
+            width=args.camera_width,
+            height=args.camera_height
+        )
+        camera_viewer.start()
     
     # Load model if path specified
     if args.load_checkpoint:
@@ -482,6 +545,10 @@ def evaluate(args, agent, env):
         # Reset environment
         state = env.reset()
         
+        # Update camera viewer with initial state
+        if camera_viewer:
+            camera_viewer.update(state)
+        
         # Initialize episode statistics
         done = False
         episode_reward = 0
@@ -494,6 +561,10 @@ def evaluate(args, agent, env):
             
             # Apply action to environment
             next_state, reward, done, info = env.step(action)
+            
+            # Update camera viewer with new state
+            if camera_viewer:
+                camera_viewer.update(next_state)
             
             # Update extended metrics
             agent.update_extended_metrics(state, action, reward, info)
@@ -549,6 +620,10 @@ def evaluate(args, agent, env):
         episode_metrics.append(metric_entry)
         
         logger.info(f"Episode {episode+1}: Reward = {episode_reward:.2f}, Steps = {step_count}")
+    
+    # Close camera viewer if open
+    if camera_viewer:
+        camera_viewer.stop()
     
     # Calculate average metrics
     avg_reward = np.mean(eval_results['rewards'])

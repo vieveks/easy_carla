@@ -9,6 +9,13 @@ import matplotlib.colors as mcolors
 import seaborn as sns
 import pandas as pd
 from collections import defaultdict
+import matplotlib.gridspec as gridspec
+import cv2
+import pygame
+import threading
+import time
+import queue
+from collections import deque
 
 # Define consistent colors for algorithms
 ALGORITHM_COLORS = {
@@ -18,6 +25,118 @@ ALGORITHM_COLORS = {
     'sarsa': '#d62728',    # red
     'ppo': '#9467bd',      # purple
 }
+
+class CameraViewer:
+    """
+    Class for displaying camera input from CARLA in a separate window.
+    This provides a real-time view of what the agent is seeing.
+    """
+    def __init__(self, window_name="Camera View", width=400, height=300, max_queue_size=5):
+        """
+        Initialize the camera viewer.
+        
+        Args:
+            window_name (str): Name of the window
+            width (int): Width of the display window
+            height (int): Height of the display window
+            max_queue_size (int): Maximum size of the frame queue
+        """
+        self.window_name = window_name
+        self.width = width
+        self.height = height
+        self.running = False
+        self.thread = None
+        self.frame_queue = queue.Queue(maxsize=max_queue_size)
+        
+        # Initialize pygame for display
+        pygame.init()
+        pygame.display.init()
+        self.screen = pygame.display.set_mode((width, height))
+        pygame.display.set_caption(window_name)
+        
+        # Initialize a clock for controlling FPS
+        self.clock = pygame.time.Clock()
+        self.fps = 20  # Target FPS
+    
+    def start(self):
+        """Start the viewer thread"""
+        if not self.running:
+            self.running = True
+            self.thread = threading.Thread(target=self._display_loop)
+            self.thread.daemon = True  # Thread will exit when main program exits
+            self.thread.start()
+            print(f"Camera viewer started: {self.window_name}")
+    
+    def stop(self):
+        """Stop the viewer thread"""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=1.0)
+            self.thread = None
+        pygame.quit()
+        print(f"Camera viewer stopped: {self.window_name}")
+    
+    def update(self, frame):
+        """
+        Update the display with a new frame.
+        
+        Args:
+            frame: The camera frame to display
+        """
+        if self.running:
+            # Don't block if queue is full (just drop frames)
+            try:
+                # Ensure frame is the right shape and dtype
+                if frame is not None:
+                    # Resize the frame if needed
+                    if frame.shape[0] != self.height or frame.shape[1] != self.width:
+                        frame = cv2.resize(frame, (self.width, self.height))
+                    
+                    # Ensure frame is RGB format
+                    if len(frame.shape) == 2:  # Grayscale
+                        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+                    elif frame.shape[2] == 4:  # RGBA
+                        frame = frame[:, :, :3]  # Drop alpha channel
+                    
+                    # Ensure the frame is uint8
+                    if frame.dtype != np.uint8:
+                        frame = (frame * 255).astype(np.uint8)
+                    
+                    self.frame_queue.put(frame, block=False)
+            except queue.Full:
+                pass  # Skip frame if queue is full
+    
+    def _display_loop(self):
+        """Main display loop running in a separate thread"""
+        last_frame = None
+        
+        while self.running:
+            # Check for pygame events (e.g., window close)
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+                    break
+            
+            # Get newest frame from queue if available
+            try:
+                frame = self.frame_queue.get(block=False)
+                last_frame = frame
+                self.frame_queue.task_done()
+            except queue.Empty:
+                frame = last_frame  # Keep displaying last frame if no new ones
+            
+            # Display the frame if we have one
+            if frame is not None:
+                # Convert frame to pygame surface
+                frame = np.flipud(np.fliplr(frame))  # Flip to match pygame's coordinate system
+                surf = pygame.surfarray.make_surface(frame.swapaxes(0, 1))
+                
+                # Draw to screen
+                self.screen.blit(surf, (0, 0))
+                pygame.display.flip()
+            
+            # Control the frame rate
+            self.clock.tick(self.fps)
 
 def load_metrics(file_path):
     """
@@ -627,6 +746,183 @@ def plot_training_progress(metrics_paths, algo_names=None, output_dir=None):
         plt.show()
     
     plt.close()
+
+def create_observation_figure(state, figsize=(8, 8)):
+    """
+    Create a figure to visualize the agent's observation.
+    
+    Args:
+        state: The observation state (usually an image)
+        figsize: Size of the figure
+        
+    Returns:
+        fig: The created figure
+    """
+    fig = plt.figure(figsize=figsize)
+    
+    if len(state.shape) == 3:  # RGB image
+        plt.imshow(state)
+    elif len(state.shape) == 2:  # Grayscale image
+        plt.imshow(state, cmap='gray')
+    
+    plt.axis('off')
+    plt.tight_layout()
+    
+    return fig
+
+def plot_learning_curves(rewards, losses=None, smoothing=0.9, figsize=(12, 6)):
+    """
+    Plot learning curves for the agent.
+    
+    Args:
+        rewards: List of episode rewards
+        losses: List of losses
+        smoothing: Exponential moving average smoothing factor
+        figsize: Size of the figure
+        
+    Returns:
+        fig: The created figure
+    """
+    fig = plt.figure(figsize=figsize)
+    
+    if losses is not None:
+        gs = gridspec.GridSpec(2, 1, height_ratios=[2, 1])
+        ax1 = plt.subplot(gs[0])
+        ax2 = plt.subplot(gs[1])
+    else:
+        ax1 = plt.subplot(111)
+    
+    # Plot rewards
+    episodes = np.arange(1, len(rewards) + 1)
+    ax1.plot(episodes, rewards, 'b-', alpha=0.3, label='Rewards')
+    
+    # Compute smoothed rewards
+    smoothed_rewards = []
+    if len(rewards) > 0:
+        r_avg = rewards[0]
+        for r in rewards:
+            r_avg = smoothing * r_avg + (1 - smoothing) * r
+            smoothed_rewards.append(r_avg)
+        
+        ax1.plot(episodes, smoothed_rewards, 'b-', label=f'Smoothed Rewards (α={smoothing})')
+    
+    ax1.set_xlabel('Episode')
+    ax1.set_ylabel('Reward')
+    ax1.legend()
+    ax1.grid(True, linestyle='--', alpha=0.6)
+    
+    # Plot losses if provided
+    if losses is not None and len(losses) > 0:
+        loss_steps = np.arange(1, len(losses) + 1)
+        ax2.plot(loss_steps, losses, 'r-', alpha=0.3, label='Loss')
+        
+        # Compute smoothed losses
+        smoothed_losses = []
+        loss_avg = losses[0]
+        for loss in losses:
+            loss_avg = smoothing * loss_avg + (1 - smoothing) * loss
+            smoothed_losses.append(loss_avg)
+            
+        ax2.plot(loss_steps, smoothed_losses, 'r-', label=f'Smoothed Loss (α={smoothing})')
+        ax2.set_xlabel('Step')
+        ax2.set_ylabel('Loss')
+        ax2.legend()
+        ax2.grid(True, linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    return fig
+
+def plot_all_metrics(algorithm_results, output_path=None):
+    """
+    Create a comprehensive plot of metrics for algorithm comparison.
+    
+    Args:
+        algorithm_results: Dictionary of results for different algorithms
+        output_path: Path to save the figure
+    """
+    if not algorithm_results:
+        print("No results to plot")
+        return
+    
+    fig = plt.figure(figsize=(15, 10))
+    gs = gridspec.GridSpec(2, 2)
+    
+    # Extract algorithm names
+    algorithms = list(algorithm_results.keys())
+    colors = ['b', 'g', 'r', 'c', 'm', 'y', 'k']
+    
+    # Plot reward comparison
+    ax1 = plt.subplot(gs[0, 0])
+    for i, algo in enumerate(algorithms):
+        color = colors[i % len(colors)]
+        if 'rewards' in algorithm_results[algo]:
+            rewards = algorithm_results[algo]['rewards']
+            mean_reward = np.mean(rewards)
+            ax1.bar(i, mean_reward, color=color, label=f'{algo.upper()} ({mean_reward:.2f})')
+    
+    ax1.set_ylabel('Average Reward')
+    ax1.set_title('Algorithm Reward Comparison')
+    ax1.set_xticks(range(len(algorithms)))
+    ax1.set_xticklabels([algo.upper() for algo in algorithms])
+    ax1.grid(True, linestyle='--', alpha=0.6)
+    
+    # Plot episode length comparison
+    ax2 = plt.subplot(gs[0, 1])
+    for i, algo in enumerate(algorithms):
+        color = colors[i % len(colors)]
+        if 'steps' in algorithm_results[algo]:
+            steps = algorithm_results[algo]['steps']
+            mean_steps = np.mean(steps)
+            ax2.bar(i, mean_steps, color=color, label=f'{algo.upper()} ({mean_steps:.2f})')
+    
+    ax2.set_ylabel('Average Episode Length')
+    ax2.set_title('Episode Length Comparison')
+    ax2.set_xticks(range(len(algorithms)))
+    ax2.set_xticklabels([algo.upper() for algo in algorithms])
+    ax2.grid(True, linestyle='--', alpha=0.6)
+    
+    # Plot safety metrics
+    ax3 = plt.subplot(gs[1, 0])
+    width = 0.3
+    x = np.arange(len(algorithms))
+    
+    for i, algo in enumerate(algorithms):
+        collision_count = algorithm_results[algo].get('collision_count', 0)
+        lane_invasion_count = algorithm_results[algo].get('lane_invasion_count', 0)
+        
+        ax3.bar(x[i] - width/2, collision_count, width, color='r', label='Collisions' if i == 0 else "")
+        ax3.bar(x[i] + width/2, lane_invasion_count, width, color='y', label='Lane Invasions' if i == 0 else "")
+    
+    ax3.set_ylabel('Count')
+    ax3.set_title('Safety Metrics')
+    ax3.set_xticks(x)
+    ax3.set_xticklabels([algo.upper() for algo in algorithms])
+    ax3.legend()
+    ax3.grid(True, linestyle='--', alpha=0.6)
+    
+    # Plot centerline deviations
+    ax4 = plt.subplot(gs[1, 1])
+    for i, algo in enumerate(algorithms):
+        color = colors[i % len(colors)]
+        if 'centerline_deviations' in algorithm_results[algo]:
+            centerline_dev = algorithm_results[algo]['centerline_deviations']
+            if centerline_dev:
+                mean_dev = np.mean(centerline_dev)
+                ax4.bar(i, mean_dev, color=color, label=f'{algo.upper()} ({mean_dev:.2f})')
+    
+    ax4.set_ylabel('Average Centerline Deviation (m)')
+    ax4.set_title('Path Following Accuracy')
+    ax4.set_xticks(range(len(algorithms)))
+    ax4.set_xticklabels([algo.upper() for algo in algorithms])
+    ax4.grid(True, linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Saved plot to {output_path}")
+    
+    return fig
 
 if __name__ == "__main__":
     # Example usage

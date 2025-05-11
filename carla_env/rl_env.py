@@ -25,7 +25,8 @@ class CarlaEnv(gym.Env):
     
     def __init__(self, host=config.CARLA_HOST, port=config.CARLA_PORT, 
                  timeout=config.CARLA_TIMEOUT, town=config.CARLA_MAP,
-                 image_shape=(84, 84, 3)):
+                 image_shape=(84, 84, 3), navigation_enabled=config.NAVIGATION_ENABLED,
+                 route_difficulty=config.ROUTE_DIFFICULTY):
         super(CarlaEnv, self).__init__()
         
         # Initialize CARLA client
@@ -68,6 +69,13 @@ class CarlaEnv(gym.Env):
         self.lane_invasion_count = 0
         self.target_reached = False
         
+        # Navigation settings
+        self.navigation_enabled = navigation_enabled
+        self.route_difficulty = route_difficulty
+        self.total_targets_reached = 0
+        self.previous_distance_to_target = float('inf')
+        self.episodes_completed = 0
+        
     def connect(self):
         """Connect to the CARLA server"""
         if not self.connected:
@@ -91,6 +99,9 @@ class CarlaEnv(gym.Env):
             random.seed(seed)
             np.random.seed(seed)
         
+        # Update difficulty based on progress
+        self._update_navigation_difficulty()
+        
         # Reset client (spawn vehicle, setup sensors)
         self.client.reset()
         
@@ -102,6 +113,8 @@ class CarlaEnv(gym.Env):
         self.previous_action = None
         self.last_locations.clear()
         self.centerline_deviations = []
+        self.target_reached = False
+        self.previous_distance_to_target = float('inf')
         
         # Track current vehicle position
         vehicle_state = self.client.get_vehicle_state()
@@ -113,6 +126,11 @@ class CarlaEnv(gym.Env):
             # Store initial waypoint
             distance = self.client.get_distance_from_center()
             self.previous_waypoint = distance
+            
+            # Get initial distance to target if navigation is enabled
+            if self.navigation_enabled:
+                nav_info = self.client.get_navigation_info()
+                self.previous_distance_to_target = nav_info['distance_to_target']
         
         # Tick the simulation to get initial observation
         self.client.tick()
@@ -134,6 +152,10 @@ class CarlaEnv(gym.Env):
         
         # Advance simulation
         self.client.tick()
+        
+        # Update navigation targets if enabled
+        if self.navigation_enabled:
+            self.target_reached = self.client.update_navigation()
         
         # Get new observation
         observation = self._get_observation()
@@ -211,9 +233,6 @@ class CarlaEnv(gym.Env):
         else:
             info['lane_invasion'] = False
         
-        # Reset sensor flags for next step
-        self.client.reset_sensors()
-        
         if vehicle_state:
             # Current position
             loc = vehicle_state['location']
@@ -242,6 +261,44 @@ class CarlaEnv(gym.Env):
             speed_reward = config.REWARD_SPEED * min(speed, 30) / 30.0  # Cap at 30 km/h
             reward += speed_reward
             info['speed_reward'] = speed_reward
+            
+            # Navigation rewards if enabled
+            if self.navigation_enabled:
+                nav_info = self.client.get_navigation_info()
+                
+                # Add navigation info to the reward information
+                info.update(nav_info)
+                
+                # Target reached bonus
+                if nav_info['target_reached']:
+                    target_reward = config.REWARD_TARGET_REACHED
+                    reward += target_reward
+                    info['target_reward'] = target_reward
+                    self.total_targets_reached += 1
+                
+                # Direction to target reward
+                direction = nav_info['direction_to_target']
+                direction_reward = config.WAYPOINT_DIRECTION_WEIGHT * direction[0]  # Use dot product
+                reward += direction_reward
+                info['direction_reward'] = direction_reward
+                
+                # Progress reward - getting closer to target
+                current_distance = nav_info['distance_to_target']
+                if self.previous_distance_to_target != float('inf'):
+                    distance_improvement = self.previous_distance_to_target - current_distance
+                    distance_reward = config.WAYPOINT_DISTANCE_WEIGHT * distance_improvement
+                    reward += distance_reward
+                    info['distance_reward'] = distance_reward
+                
+                # Update previous distance for next step
+                self.previous_distance_to_target = current_distance
+                
+                # Route completion reward
+                if nav_info['route_complete']:
+                    completion_reward = config.REWARD_TARGET_REACHED * 2  # Double reward for completing the route
+                    reward += completion_reward
+                    info['completion_reward'] = completion_reward
+                    self.target_reached = True
             
             # Update previous location
             self.previous_location = current_location
@@ -280,8 +337,8 @@ class CarlaEnv(gym.Env):
         if self.client.has_collided():
             return True
         
-        # Check if target reached (not implemented yet)
-        if self.target_reached:
+        # Check if target reached (for navigation-enabled mode)
+        if self.navigation_enabled and self.target_reached:
             return True
         
         # Check if vehicle has stopped moving for too long
@@ -297,6 +354,10 @@ class CarlaEnv(gym.Env):
             # If vehicle hasn't moved much for a long time
             if dist < 0.5 and self.current_step > 50:  # Less than 0.5 meters and more than 50 steps
                 return True
+        
+        # Check if max steps reached
+        if self.current_step >= self.max_episode_steps:
+            return True
         
         return False
     
@@ -316,6 +377,13 @@ class CarlaEnv(gym.Env):
             info['distance_to_center'] = self.client.get_distance_from_center()
             info['at_junction'] = self.client.is_at_junction()
         
+        # Add navigation info if enabled
+        if self.navigation_enabled:
+            nav_info = self.client.get_navigation_info()
+            info['navigation'] = nav_info
+            info['navigation_difficulty'] = self.route_difficulty
+            info['total_targets_reached'] = self.total_targets_reached
+        
         return info
     
     def render(self, mode='human'):
@@ -327,29 +395,64 @@ class CarlaEnv(gym.Env):
     
     def close(self):
         """
-        Clean up resources when environment is no longer needed.
+        Clean up resources.
         """
-        if self.connected:
+        if self.client:
             self.client.disconnect()
-            self.connected = False
+        self.connected = False
     
     def get_episode_statistics(self):
         """
-        Get statistics for the current episode.
+        Get statistics from the completed episode.
         """
+        # Update episode counter
+        self.episodes_completed += 1
+        
         # Calculate average centerline deviation
-        avg_centerline_deviation = 0.0
-        if self.centerline_deviations:
-            avg_centerline_deviation = sum(self.centerline_deviations) / len(self.centerline_deviations)
-            
-        # Prepare statistics dictionary
+        avg_centerline_deviation = np.mean(self.centerline_deviations) if self.centerline_deviations else 0
+        
+        # Compile statistics
         stats = {
-            'total_reward': self.total_reward,
+            'reward': self.total_reward,
             'steps': self.current_step,
             'collision_count': self.collision_count,
             'lane_invasion_count': self.lane_invasion_count,
             'avg_centerline_deviation': avg_centerline_deviation,
-            'junction_actions': self.episode_statistics['junction_actions'],
+            'junction_actions': self.episode_statistics['junction_actions'].copy(),
+            'targets_reached': self.total_targets_reached
         }
         
-        return stats 
+        # Add navigation stats if enabled
+        if self.navigation_enabled:
+            if self.total_targets_reached > 0:
+                # Count as success if at least one target was reached
+                stats['success_rate'] = 1.0
+            else:
+                stats['success_rate'] = 0.0
+            
+            stats['navigation_difficulty'] = self.route_difficulty
+        else:
+            stats['success_rate'] = 0.0
+        
+        # Reset episode stats for next episode
+        self.episode_statistics['junction_actions'] = {
+            'left': 0,
+            'right': 0,
+            'forward': 0,
+            'other': 0
+        }
+        
+        return stats
+    
+    def _update_navigation_difficulty(self):
+        """Update the navigation difficulty based on episodes completed"""
+        if not self.navigation_enabled:
+            return
+            
+        # Check if we should update difficulty
+        for difficulty, threshold in config.DIFFICULTY_PROGRESSION.items():
+            if self.episodes_completed >= threshold:
+                self.route_difficulty = difficulty
+                
+        # Update the client's difficulty setting
+        self.client.set_navigation_difficulty(self.route_difficulty) 
